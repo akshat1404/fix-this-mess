@@ -3,17 +3,70 @@ import Groq from "groq-sdk";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import readline from "readline";
+
+if (!process.env.GROQ_API_KEY) {
+  console.log("GROQ_API_KEY is missing.");
+  console.log("Get your free API key at: https://console.groq.com/keys");
+  console.log("Then create a .env file and add: GROQ_API_KEY=your_key_here");
+  process.exit(1);
+}
 
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+function askQuestion(question) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+function resolvePath(input) {
+  const lower = input.toLowerCase();
+
+  const shortcuts = {
+    desktop: [
+      path.join(os.homedir(), "OneDrive", "Desktop"),
+      path.join(os.homedir(), "Desktop"),
+    ],
+    downloads: [path.join(os.homedir(), "Downloads")],
+    documents: [path.join(os.homedir(), "Documents")],
+    pictures: [path.join(os.homedir(), "Pictures")],
+    videos: [path.join(os.homedir(), "Videos")],
+    music: [path.join(os.homedir(), "Music")],
+  };
+
+  if (shortcuts[lower]) {
+    for (const p of shortcuts[lower]) {
+      if (fs.existsSync(p)) return p;
+    }
+  }
+
+  if (fs.existsSync(input)) return input;
+
+  const onOneDriveDesktop = path.join(os.homedir(), "OneDrive", "Desktop", input);
+  if (fs.existsSync(onOneDriveDesktop)) return onOneDriveDesktop;
+
+  const onDesktop = path.join(os.homedir(), "Desktop", input);
+  if (fs.existsSync(onDesktop)) return onDesktop;
+
+  const inHome = path.join(os.homedir(), input);
+  if (fs.existsSync(inHome)) return inHome;
+
+  return null;
+}
+
 function list_files({ directory }) {
   if (!fs.existsSync(directory)) return `Directory not found: ${directory}`;
-  
   const items = fs.readdirSync(directory).filter((f) => {
-    const fullPath = path.join(directory, f);
-    return fs.statSync(fullPath).isFile(); 
+    return fs.statSync(path.join(directory, f)).isFile();
   });
-
   return items.length > 0 ? items.join("\n") : "No files found.";
 }
 
@@ -25,15 +78,13 @@ function create_folder({ folder_path }) {
 
 function move_file({ source, destination }) {
   if (!fs.existsSync(source)) return `Source file not found: ${source}`;
-
   if (fs.existsSync(destination)) {
     const ext = path.extname(destination);
     const base = destination.slice(0, -ext.length);
     destination = `${base}_${Date.now()}${ext}`;
   }
-
   fs.renameSync(source, destination);
-  return `Moved: ${path.basename(source)} → ${destination}`;
+  return `Moved: ${path.basename(source)} -> ${destination}`;
 }
 
 function write_report({ report_path, content }) {
@@ -52,7 +103,7 @@ const tools = [
       parameters: {
         type: "object",
         properties: {
-          directory: { type: "string", description: "Path to the directory" },
+          directory: { type: "string" },
         },
         required: ["directory"],
       },
@@ -66,7 +117,7 @@ const tools = [
       parameters: {
         type: "object",
         properties: {
-          folder_path: { type: "string", description: "Full path of folder to create" },
+          folder_path: { type: "string" },
         },
         required: ["folder_path"],
       },
@@ -76,12 +127,12 @@ const tools = [
     type: "function",
     function: {
       name: "move_file",
-      description: "Move a file from source to destination",
+      description: "Move a file from source path to destination path",
       parameters: {
         type: "object",
         properties: {
-          source: { type: "string", description: "Current full path of the file" },
-          destination: { type: "string", description: "Destination full path" },
+          source: { type: "string" },
+          destination: { type: "string" },
         },
         required: ["source", "destination"],
       },
@@ -91,12 +142,12 @@ const tools = [
     type: "function",
     function: {
       name: "write_report",
-      description: "Write a text report summarizing what was done",
+      description: "Write a summary report of what was done",
       parameters: {
         type: "object",
         properties: {
-          report_path: { type: "string", description: "Full path to save the report" },
-          content: { type: "string", description: "Report content" },
+          report_path: { type: "string" },
+          content: { type: "string" },
         },
         required: ["report_path", "content"],
       },
@@ -105,19 +156,18 @@ const tools = [
 ];
 
 async function runAgent(targetDirectory) {
-  console.log(`\n🤖 Starting agent on: ${targetDirectory}\n`);
+  console.log(`\nStarting agent on: ${targetDirectory}\n`);
 
   const messages = [
     {
       role: "system",
       content: `You are a file organization agent. When given a folder to organize:
-1. First list the files to see what's there
-2. Group similar file types and create appropriate subfolders (e.g. Images, Documents, Videos, Audio, Code, Archives, Spreadsheets, Other)
+1. First list the files to see what is there
+2. Group similar file types and create appropriate subfolders such as Images, Documents, Videos, Audio, Code, Archives, Spreadsheets, Other
 3. Move each file into the right subfolder
 4. Only create folders that are actually needed based on what files exist
 5. Never move or delete folders, only files
-6. Finally write a report called organization_report.txt in the target folder summarizing what you did
-Be systematic. Think before acting.`,
+6. Finally write a report called organization_report.txt in the target folder summarizing what you did`,
     },
     {
       role: "user",
@@ -137,7 +187,7 @@ Be systematic. Think before acting.`,
     messages.push(message);
 
     if (!message.tool_calls || message.tool_calls.length === 0) {
-      console.log(`\n✅ Done!\n`);
+      console.log("\nDone!\n");
       console.log(message.content);
       break;
     }
@@ -146,11 +196,11 @@ Be systematic. Think before acting.`,
       const name = toolCall.function.name;
       const args = JSON.parse(toolCall.function.arguments);
 
-      console.log(`\n🔧 ${name}`);
-      console.log(`   →`, args);
+      console.log(`\n[${name}]`);
+      console.log("input:", args);
 
       const result = toolFunctions[name](args);
-      console.log(`   ✓`, result);
+      console.log("result:", result);
 
       messages.push({
         role: "tool",
@@ -161,5 +211,45 @@ Be systematic. Think before acting.`,
   }
 }
 
-const desktopPath = "C:\\Users\\Hp\\OneDrive\\Desktop";
-await runAgent(desktopPath);
+async function main() {
+  console.log("Folder Organizer AI");
+  console.log("-------------------");
+  console.log("Type a folder name like: desktop, downloads, documents");
+  console.log("Or type a full path like: C:\\Users\\Hp\\OneDrive\\Desktop\\my-folder\n");
+
+  const input = await askQuestion("Which folder do you want to organize? ");
+
+  const resolvedPath = resolvePath(input);
+
+  if (!resolvedPath) {
+    console.log(`Could not find folder: "${input}"`);
+    console.log("Make sure the folder exists and try again.");
+    process.exit(1);
+  }
+
+  console.log(`\nFound folder: ${resolvedPath}`);
+  const confirm = await askQuestion("Proceed with organizing this folder? (yes/no) ");
+
+  if (confirm.toLowerCase() !== "yes" && confirm.toLowerCase() !== "y") {
+    console.log("\nNo problem. Please provide the full path to the exact folder you want.\n");
+    const fullPathInput = await askQuestion("Enter full folder path: ");
+  
+    if (!fs.existsSync(fullPathInput)) {
+      console.log(`Could not find folder: "${fullPathInput}"`);
+      process.exit(1);
+    }
+  
+    const confirmFull = await askQuestion(`Organize "${fullPathInput}"? (yes/no) `);
+    if (confirmFull.toLowerCase() !== "yes" && confirmFull.toLowerCase() !== "y") {
+      console.log("Cancelled.");
+      process.exit(0);
+    }
+  
+    await runAgent(fullPathInput);
+    return;
+  }
+
+  await runAgent(resolvedPath);
+}
+
+main();
